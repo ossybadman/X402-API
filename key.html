@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Your API key — Sui Address Inspector</title>
+<style>
+  :root{
+    color-scheme:light dark;
+    --surface:#fcfcfb; --card:#ffffff; --line:#e7e5e0;
+    --ink:#1f2328; --ink-2:#5b6470; --ink-3:#8a93a0;
+    --accent:#2a78d6; --accent-soft:rgba(42,120,214,.12);
+    --good:#1f7a4d; --bad:#a63125;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --surface:#1a1a19; --card:#22232a; --line:#33353d;
+      --ink:#e8e8e6; --ink-2:#a8adb6; --ink-3:#7c828c;
+      --accent:#3987e5; --accent-soft:rgba(57,135,229,.16);
+      --good:#4cb782; --bad:#e0705f;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--surface);color:var(--ink);font:15px/1.6 system-ui,sans-serif}
+  main{max-width:680px;margin:0 auto;padding:2.5rem 1.25rem 4rem}
+  h1{font-size:1.35rem;margin:0 0 .25rem}
+  .sub{color:var(--ink-3);margin:0 0 2rem;font-size:.9rem}
+  section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1.1rem 1.25rem;margin:0 0 1.25rem}
+  h2{font-size:.95rem;margin:0 0 .75rem;font-weight:600}
+  label{display:block;font-size:.8rem;color:var(--ink-2);margin:0 0 .3rem;text-transform:uppercase;letter-spacing:.04em}
+  input{width:100%;padding:.55rem .7rem;border:1px solid var(--line);border-radius:7px;
+    background:var(--surface);color:var(--ink);font:13px/1.4 ui-monospace,Consolas,monospace}
+  input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+  .row{display:flex;gap:.6rem;align-items:flex-end;flex-wrap:wrap}
+  .row>div{flex:1;min-width:230px}
+  button{padding:.55rem 1rem;border:0;border-radius:7px;background:var(--accent);color:#fff;
+    font:600 14px system-ui;cursor:pointer;white-space:nowrap}
+  button:disabled{opacity:.55;cursor:default}
+  button.ghost{background:transparent;color:var(--ink-2);border:1px solid var(--line)}
+  .credits{display:flex;align-items:baseline;gap:.5rem;margin:.9rem 0 0}
+  .credits .n{font-size:2rem;font-weight:650;font-variant-numeric:tabular-nums;line-height:1}
+  .credits .of{color:var(--ink-3);font-size:.85rem}
+  .bar{height:6px;border-radius:99px;background:var(--accent-soft);margin:.6rem 0 0;overflow:hidden}
+  .bar>i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .3s}
+  .msg{margin:.75rem 0 0;font-size:.87rem}
+  .msg.ok{color:var(--good)} .msg.err{color:var(--bad)} .msg.mut{color:var(--ink-3)}
+  pre{margin:.75rem 0 0;padding:.8rem;background:var(--surface);border:1px solid var(--line);
+    border-radius:7px;overflow-x:auto;font:12px/1.5 ui-monospace,Consolas,monospace;max-height:22rem}
+  a{color:var(--accent)}
+  .foot{color:var(--ink-3);font-size:.82rem;margin-top:2rem}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<main>
+  <h1>Your API key</h1>
+  <p class="sub">Check your remaining credits and spend them — no payment flow, no wallet needed.</p>
+
+  <section>
+    <h2>Key</h2>
+    <div class="row">
+      <div>
+        <label for="key">API key</label>
+        <input id="key" placeholder="si_…" autocomplete="off" spellcheck="false">
+      </div>
+      <button id="check">Check</button>
+      <button id="forget" class="ghost">Forget</button>
+    </div>
+    <div id="credits" class="hide">
+      <div class="credits"><span class="n" id="remaining">—</span><span class="of">of <span id="issued">—</span> calls left</span></div>
+      <div class="bar"><i id="bar" style="width:0%"></i></div>
+    </div>
+    <p class="msg mut" id="keymsg">Paste the key from your <code>POST /keys</code> purchase. It is saved in this browser only.</p>
+  </section>
+
+  <section>
+    <h2>Inspect an address</h2>
+    <div class="row">
+      <div>
+        <label for="addr">Sui mainnet address</label>
+        <input id="addr" placeholder="0x…" autocomplete="off" spellcheck="false">
+      </div>
+      <button id="run" disabled>Spend 1 credit</button>
+    </div>
+    <p class="msg mut" id="runmsg">Enter a key above to enable this.</p>
+    <pre id="out" class="hide"></pre>
+  </section>
+
+  <p class="foot">
+    No key yet? Buy one with <code>POST /keys</code> ($0.10 for 12 calls) from the
+    <a href="https://t2000.ai/0xd228592180633594752f32acd3a2ed612d2f4b61e9c9e86ddc4e1f676dbcbe4b">t2000 storefront</a>
+    or <code>t2 pay</code>. · <a href="/">API docs</a>
+  </p>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const STORAGE = 'sui-inspector-key';
+let issued = 12;
+
+function setMsg(el, text, kind) { el.textContent = text; el.className = 'msg ' + (kind || 'mut'); }
+
+function showCredits(remaining, total) {
+  issued = total || issued;
+  $('credits').classList.remove('hide');
+  $('remaining').textContent = remaining;
+  $('issued').textContent = issued;
+  $('bar').style.width = Math.max(0, Math.min(100, (remaining / issued) * 100)) + '%';
+  $('run').disabled = remaining <= 0;
+  setMsg($('runmsg'), remaining > 0
+    ? 'Ready — this call costs a credit, not USDC.'
+    : 'No credits left. Buy another key to continue.', remaining > 0 ? 'mut' : 'err');
+}
+
+async function check(quiet) {
+  const key = $('key').value.trim();
+  if (!key) return setMsg($('keymsg'), 'Enter a key first.', 'err');
+  $('check').disabled = true;
+  try {
+    const res = await fetch('/keys/status', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: key }),
+    });
+    const d = await res.json();
+    if (!res.ok) {
+      $('credits').classList.add('hide');
+      $('run').disabled = true;
+      return setMsg($('keymsg'), d.error || 'Could not check that key.', 'err');
+    }
+    localStorage.setItem(STORAGE, key);
+    showCredits(d.remaining, d.issued);
+    setMsg($('keymsg'), quiet ? 'Key restored from this browser.' : 'Key verified and saved.', 'ok');
+  } catch {
+    setMsg($('keymsg'), 'Network error — try again.', 'err');
+  } finally {
+    $('check').disabled = false;
+  }
+}
+
+async function run() {
+  const key = $('key').value.trim();
+  const address = $('addr').value.trim();
+  if (!address) return setMsg($('runmsg'), 'Enter an address to inspect.', 'err');
+  $('run').disabled = true;
+  setMsg($('runmsg'), 'Calling…', 'mut');
+  try {
+    const res = await fetch('/inspect', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ address, apiKey: key }),
+    });
+    const d = await res.json();
+    $('out').classList.remove('hide');
+    $('out').textContent = JSON.stringify(d, null, 2);
+    if (res.ok) {
+      const left = Number(res.headers.get('X-Key-Calls-Remaining'));
+      if (!Number.isNaN(left)) showCredits(left, issued);
+      setMsg($('runmsg'), 'Done — 1 credit spent.', 'ok');
+    } else {
+      setMsg($('runmsg'), d.error ? String(d.error).slice(0, 200) : 'Call failed.', 'err');
+      $('run').disabled = false;
+    }
+  } catch {
+    setMsg($('runmsg'), 'Network error — try again.', 'err');
+    $('run').disabled = false;
+  }
+}
+
+$('check').addEventListener('click', () => check(false));
+$('run').addEventListener('click', run);
+$('key').addEventListener('keydown', (e) => { if (e.key === 'Enter') check(false); });
+$('addr').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !$('run').disabled) run(); });
+$('forget').addEventListener('click', () => {
+  localStorage.removeItem(STORAGE);
+  $('key').value = '';
+  $('credits').classList.add('hide');
+  $('run').disabled = true;
+  setMsg($('keymsg'), 'Key removed from this browser.', 'mut');
+});
+
+const saved = localStorage.getItem(STORAGE);
+if (saved) { $('key').value = saved; check(true); }
+</script>
+</body>
+</html>

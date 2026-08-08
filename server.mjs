@@ -217,11 +217,13 @@ putting it in the body &mdash; which works anywhere you can send JSON, including
 <div class="card"><pre>{"address": "0x...", "apiKey": "si_..."}</pre></div>
 <p class="k">From code, an <code>Authorization: Bearer si_...</code> header does the same thing.
 Responses carry <code>X-Key-Calls-Remaining</code>.</p>
+<p class="k">Already have a key? Open the <a href="/key">key console</a> to see your remaining
+credits and spend them from the browser &mdash; no wallet or payment flow needed.</p>
 <p class="k">Unpaid requests answer HTTP 402 with a signed Sui challenge. Invalid input is rejected
 before settlement &mdash; a failed call is never charged. Settles to
 <code>${serve.payTo}</code>.</p>
 <h2>Machine discovery</h2>
-<p><a href="/dashboard">dashboard</a> &middot; <a href="/openapi.json">openapi.json</a> &middot; <a href="/llms.txt">llms.txt</a> &middot;
+<p><a href="/key">key console</a> &middot; <a href="/dashboard">dashboard</a> &middot; <a href="/openapi.json">openapi.json</a> &middot; <a href="/llms.txt">llms.txt</a> &middot;
 <a href="https://t2000.ai/${serve.payTo}">t2000 store listing</a></p>
 </main></body></html>`);
 });
@@ -239,11 +241,30 @@ app.get('/stats.json', async (c) => {
     routes: s.routes,
     hourly: s.hourly,
     recent: s.recent,
+    keys: await store.listKeys(), // masked — see store.mjs
   });
 });
 
 const DASHBOARD_HTML = await readFile(new URL('./dashboard.html', import.meta.url), 'utf8');
 app.get('/dashboard', (c) => c.html(DASHBOARD_HTML));
+
+const KEY_CONSOLE_HTML = await readFile(new URL('./key.html', import.meta.url), 'utf8');
+app.get('/key', (c) => c.html(KEY_CONSOLE_HTML));
+
+// Free: lets a buyer check credits without spending one. Requires the key itself,
+// so it reveals nothing the caller doesn't already hold.
+app.post('/keys/status', async (c) => {
+  let apiKey;
+  try {
+    ({ apiKey } = await c.req.json());
+  } catch {
+    return c.json({ error: 'body must be JSON' }, 422);
+  }
+  if (typeof apiKey !== 'string' || !apiKey) return c.json({ error: 'apiKey is required' }, 422);
+  const status = await store.keyStatus(apiKey.trim());
+  if (!status) return c.json({ error: 'unknown or expired API key' }, 404);
+  return c.json({ remaining: status.remaining, issued: KEY_CALLS, createdAt: status.createdAt });
+});
 
 // Prepaid-key path: a valid key skips the x402 payment flow entirely. The key may
 // arrive as a Bearer header (code) or as an `apiKey` body field — the t2000 try-it

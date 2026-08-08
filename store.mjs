@@ -9,6 +9,8 @@ const HOURLY_TTL = 172800; // 48h — the dashboard only plots the last 24h
 
 const hourKey = (t = Date.now()) => Math.floor(t / HOUR) * HOUR;
 const newKeyId = () => `si_${crypto.randomUUID().replaceAll('-', '')}`;
+// Keys are bearer tokens and /dashboard is unauthenticated, so only ever show a mask there.
+const maskKey = (k) => `${k.slice(0, 7)}…${k.slice(-4)}`;
 
 function memoryStore() {
   const keys = new Map();
@@ -32,6 +34,17 @@ function memoryStore() {
       if (entry.remaining <= 0) return { ok: false, reason: 'exhausted' };
       entry.remaining -= 1;
       return { ok: true, remaining: entry.remaining, payer: entry.payer };
+    },
+    async keyStatus(apiKey) {
+      const entry = keys.get(apiKey);
+      return entry ? { remaining: entry.remaining, createdAt: entry.createdAt } : null;
+    },
+    async listKeys() {
+      return [...keys.entries()].map(([k, v]) => ({
+        masked: maskKey(k),
+        remaining: v.remaining,
+        createdAt: v.createdAt,
+      }));
     },
     async record(route, priceUsdc, payer, via, digest = null) {
       totals.calls += 1;
@@ -92,6 +105,22 @@ function redisStore(client) {
         return { ok: false, reason: 'exhausted' };
       }
       return { ok: true, remaining, payer: (await client.hGet(`key:${apiKey}`, 'payer')) || null };
+    },
+    async keyStatus(apiKey) {
+      const h = await client.hGetAll(`key:${apiKey}`);
+      if (!h || h.remaining === undefined) return null;
+      return { remaining: Number(h.remaining), createdAt: Number(h.createdAt) };
+    },
+    async listKeys() {
+      const ids = await client.sMembers('keys:all');
+      const rows = await Promise.all(ids.map((k) => client.hGetAll(`key:${k}`)));
+      return ids
+        .map((k, i) => ({
+          masked: maskKey(k),
+          remaining: Number(rows[i]?.remaining ?? 0),
+          createdAt: Number(rows[i]?.createdAt ?? 0),
+        }))
+        .sort((a, b) => b.createdAt - a.createdAt);
     },
     async record(route, priceUsdc, payer, via, digest = null) {
       const h = hourKey();
