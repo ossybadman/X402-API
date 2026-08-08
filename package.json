@@ -1,0 +1,29 @@
+{
+  "name": "sui-inspector-x402",
+  "version": "1.0.0",
+  "description": "Sui address inspector — paid per call via x402 USDC on Sui mainnet",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ossybadman/X402-API.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/ossybadman/X402-API/issues"
+  },
+  "homepage": "https://github.com/ossybadman/X402-API#readme",
+  "dependencies": {
+    "@hono/node-server": "^2.1.0",
+    "@mysten/sui": "^2.23.2",
+    "@t2000/serve": "^10.28.0",
+    "hono": "^4.13.1",
+    "zod": "^4.4.3"
+  }
+}
