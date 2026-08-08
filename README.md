@@ -15,8 +15,16 @@ Returns for any Sui mainnet address:
 - current epoch
 
 `POST /keys` — pay $0.10 USDC once, get a prepaid API key good for 12 `/inspect`
-calls via `Authorization: Bearer <key>` (no per-call payment flow). Keys are
-in-memory and reset on redeploy.
+calls via `Authorization: Bearer <key>` (no per-call payment flow).
+
+Keys and call metrics persist in Redis when `REDIS_URL` is set; without it the
+server falls back to an in-memory store that resets on restart (fine for local
+dev, not for real buyers). Credits are spent with an atomic `HINCRBY`, and the
+request body is validated before a credit is deducted, so a malformed call is
+never charged.
+
+`GET /dashboard` — seller dashboard (revenue, calls, prepaid keys, wallet
+balance, calls-per-hour, recent activity), fed by `GET /stats.json`.
 
 Discovery: `GET /openapi.json`, `GET /llms.txt`. Health: `GET /health`. Landing page: `GET /`.
 

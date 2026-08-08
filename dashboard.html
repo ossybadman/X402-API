@@ -82,7 +82,7 @@
   <section>
     <h2>Recent activity</h2>
     <table id="recent"><thead><tr><th>When</th><th>Route</th><th>Via</th><th>Payer</th><th class="num">USDC</th></tr></thead><tbody></tbody></table>
-    <div class="empty" id="recent-empty" hidden>No calls yet this session.</div>
+    <div class="empty" id="recent-empty" hidden>No calls yet.</div>
   </section>
 </main>
 <div id="tooltip"></div>
@@ -163,7 +163,7 @@ async function refresh() {
     drawChart(d.hourly);
     $('routes').tBodies[0].innerHTML = Object.entries(d.routes).map(([p, r]) =>
       '<tr><td><code>POST /' + p + '</code></td><td class="num">' + r.calls + '</td><td class="num">' + fmtUsd(r.revenueUsdc) + '</td></tr>'
-    ).join('') || '<tr><td colspan="3" class="empty">No calls yet this session.</td></tr>';
+    ).join('') || '<tr><td colspan="3" class="empty">No calls yet.</td></tr>';
     const rec = d.recent ?? [];
     $('recent-empty').hidden = rec.length > 0;
     $('recent').hidden = rec.length === 0;
