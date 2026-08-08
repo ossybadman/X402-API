@@ -15,7 +15,10 @@ Returns for any Sui mainnet address:
 - current epoch
 
 `POST /keys` — pay $0.10 USDC once, get a prepaid API key good for 12 `/inspect`
-calls via `Authorization: Bearer <key>` (no per-call payment flow).
+calls. Spend a credit by passing the key either as an `Authorization: Bearer
+<key>` header or as an `apiKey` field in the JSON body. The body form matters:
+the t2000 storefront's try-it dialog can only set a body, so it is the only way
+a key is usable from the UI where it was bought.
 
 Keys and call metrics persist in Redis when `REDIS_URL` is set; without it the
 server falls back to an in-memory store that resets on restart (fine for local

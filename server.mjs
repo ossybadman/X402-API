@@ -17,6 +17,10 @@ const input = z.object({
     .string()
     .describe('Sui address to inspect (0x-prefixed, mainnet)')
     .refine((a) => isValidSuiAddress(a), 'not a valid Sui address'),
+  apiKey: z
+    .string()
+    .describe('Optional prepaid key from POST /keys — supply it to spend a credit instead of paying')
+    .optional(),
 });
 
 const output = z.object({
@@ -143,7 +147,7 @@ const keyOutput = z.object({
 serve
   .route({
     path: 'keys',
-    description: `Buy a prepaid API key: one ${KEY_PRICE} USDC payment grants ${KEY_CALLS} /inspect calls via "Authorization: Bearer <key>" — no per-call payment flow needed.`,
+    description: `Buy a prepaid API key: one ${KEY_PRICE} USDC payment grants ${KEY_CALLS} /inspect calls. Spend it by putting the key in the /inspect body as "apiKey", or as an "Authorization: Bearer <key>" header — either way those calls cost nothing further.`,
   })
   .paid(KEY_PRICE)
   .response(z.toJSONSchema(keyOutput))
@@ -160,7 +164,7 @@ serve
   .route({
     path: 'inspect',
     description:
-      'Inspect any Sui mainnet address: coin balances (with symbols and human units), owned-object profile, staking snapshot, current epoch.',
+      'Inspect any Sui mainnet address: coin balances (with symbols and human units), owned-object profile, staking snapshot, current epoch. Holders of a prepaid key from POST /keys can add "apiKey" to the body to spend a credit instead of paying.',
   })
   .paid('0.01')
   .body(input, z.toJSONSchema(input))
@@ -206,6 +210,12 @@ app.get('/', (c) => {
 <div class="card"><table>${rows}</table></div>
 <h2>Pay per call (x402, USDC on Sui mainnet)</h2>
 <div class="card"><pre>t2 pay ${base}/inspect --data '{"address":"0x..."}' --max-price 0.05</pre></div>
+<h2>Or prepay once</h2>
+<p class="k">Buy a key with <code>POST /keys</code> ($${KEY_PRICE}, ${KEY_CALLS} calls), then spend credits by
+putting it in the body &mdash; which works anywhere you can send JSON, including the t2000 try-it dialog:</p>
+<div class="card"><pre>{"address": "0x...", "apiKey": "si_..."}</pre></div>
+<p class="k">From code, an <code>Authorization: Bearer si_...</code> header does the same thing.
+Responses carry <code>X-Key-Calls-Remaining</code>.</p>
 <p class="k">Unpaid requests answer HTTP 402 with a signed Sui challenge. Invalid input is rejected
 before settlement &mdash; a failed call is never charged. Settles to
 <code>${serve.payTo}</code>.</p>
@@ -234,18 +244,26 @@ app.get('/stats.json', async (c) => {
 const DASHBOARD_HTML = await readFile(new URL('./dashboard.html', import.meta.url), 'utf8');
 app.get('/dashboard', (c) => c.html(DASHBOARD_HTML));
 
-// Prepaid-key path: a valid Bearer key skips the x402 payment flow entirely.
+// Prepaid-key path: a valid key skips the x402 payment flow entirely. The key may
+// arrive as a Bearer header (code) or as an `apiKey` body field — the t2000 try-it
+// modal can only set a body, so body support is what makes a key usable there.
 app.post('/inspect', async (c, next) => {
   const auth = c.req.header('authorization') ?? '';
-  const key = auth.startsWith('Bearer ') ? auth.slice(7).trim() : null;
+  const headerKey = auth.startsWith('Bearer ') ? auth.slice(7).trim() : null;
+  // Read from a clone so the untouched original still reaches the x402 layer.
+  let body = null;
+  try {
+    const text = await c.req.raw.clone().text();
+    if (text) body = JSON.parse(text);
+  } catch {
+    // fall through: malformed JSON is reported below, or by the x402 layer
+  }
+  const bodyKey = typeof body?.apiKey === 'string' ? body.apiKey.trim() : null;
+  const key = headerKey || bodyKey;
   if (!key) return next();
   // Validate the body before spending a credit so a malformed call is never charged.
-  let parsed;
-  try {
-    parsed = input.safeParse(await c.req.json());
-  } catch {
-    return c.json({ error: 'body must be JSON' }, 422);
-  }
+  const parsed = body ? input.safeParse(body) : null;
+  if (!parsed) return c.json({ error: 'body must be JSON' }, 422);
   if (!parsed.success) return c.json({ error: parsed.error.message }, 422);
   const spend = await store.consumeKey(key);
   if (!spend.ok) {
