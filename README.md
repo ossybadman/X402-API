@@ -14,7 +14,11 @@ Returns for any Sui mainnet address:
 - owned-object profile (sample of 50, top types, StakedSui count)
 - current epoch
 
-Discovery: `GET /openapi.json`, `GET /llms.txt`. Health: `GET /health`.
+`POST /keys` — pay $0.10 USDC once, get a prepaid API key good for 12 `/inspect`
+calls via `Authorization: Bearer <key>` (no per-call payment flow). Keys are
+in-memory and reset on redeploy.
+
+Discovery: `GET /openapi.json`, `GET /llms.txt`. Health: `GET /health`. Landing page: `GET /`.
 
 ## Pay for a call
 

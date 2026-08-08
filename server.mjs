@@ -110,6 +110,35 @@ const serve = createServeFromEnv({
   ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v)),
 });
 
+// --- Prepaid API keys: pay once via x402, then call with Authorization: Bearer <key>.
+// In-memory (single long-running process) — keys do not survive a redeploy.
+const KEY_PRICE = '0.10';
+const KEY_CALLS = 12;
+const apiKeys = new Map();
+
+const keyOutput = z.object({
+  apiKey: z.string(),
+  calls: z.number(),
+  usage: z.string(),
+});
+
+serve
+  .route({
+    path: 'keys',
+    description: `Buy a prepaid API key: one ${KEY_PRICE} USDC payment grants ${KEY_CALLS} /inspect calls via "Authorization: Bearer <key>" — no per-call payment flow needed.`,
+  })
+  .paid(KEY_PRICE)
+  .response(z.toJSONSchema(keyOutput))
+  .handler(async ({ payer }) => {
+    const apiKey = `si_${crypto.randomUUID().replaceAll('-', '')}`;
+    apiKeys.set(apiKey, { remaining: KEY_CALLS, payer, createdAt: Date.now() });
+    return {
+      apiKey,
+      calls: KEY_CALLS,
+      usage: 'POST /inspect with header "Authorization: Bearer <apiKey>" — no X-PAYMENT needed.',
+    };
+  });
+
 serve
   .route({
     path: 'inspect',
@@ -165,6 +194,26 @@ before settlement &mdash; a failed call is never charged. Settles to
 <p><a href="/openapi.json">openapi.json</a> &middot; <a href="/llms.txt">llms.txt</a> &middot;
 <a href="https://t2000.ai/${serve.payTo}">t2000 store listing</a></p>
 </main></body></html>`);
+});
+
+// Prepaid-key path: a valid Bearer key skips the x402 payment flow entirely.
+app.post('/inspect', async (c, next) => {
+  const auth = c.req.header('authorization') ?? '';
+  const key = auth.startsWith('Bearer ') ? auth.slice(7).trim() : null;
+  if (!key) return next();
+  const entry = apiKeys.get(key);
+  if (!entry) return c.json({ error: 'unknown or expired API key' }, 401);
+  if (entry.remaining <= 0) return c.json({ error: 'API key out of credits — buy a new one at POST /keys' }, 402);
+  let parsed;
+  try {
+    parsed = input.safeParse(await c.req.json());
+  } catch {
+    return c.json({ error: 'body must be JSON' }, 422);
+  }
+  if (!parsed.success) return c.json({ error: parsed.error.message }, 422);
+  entry.remaining -= 1;
+  const result = await inspect(parsed.data.address);
+  return c.json(result, 200, { 'X-Key-Calls-Remaining': String(entry.remaining) });
 });
 
 app.all('*', (c) => serve.fetch(c.req.raw));
