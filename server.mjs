@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { serve as listen } from '@hono/node-server';
 import { Hono } from 'hono';
 import { createServeFromEnv } from '@t2000/serve';
@@ -110,6 +111,43 @@ const serve = createServeFromEnv({
   ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v)),
 });
 
+// --- Session metrics (in-memory; reset on redeploy). Fed to /stats.json + /dashboard.
+const metrics = {
+  bootedAt: Date.now(),
+  routes: new Map(), // path -> { calls, revenueUsdc }
+  hourly: new Map(), // hourStartMs -> { calls, revenueUsdc }
+  recent: [], // newest first, capped
+  keysIssued: 0,
+};
+function record(route, priceUsdc, payer, via) {
+  const r = metrics.routes.get(route) ?? { calls: 0, revenueUsdc: 0 };
+  r.calls += 1;
+  r.revenueUsdc += priceUsdc;
+  metrics.routes.set(route, r);
+  const hour = Math.floor(Date.now() / 3600000) * 3600000;
+  const h = metrics.hourly.get(hour) ?? { calls: 0, revenueUsdc: 0 };
+  h.calls += 1;
+  h.revenueUsdc += priceUsdc;
+  metrics.hourly.set(hour, h);
+  for (const k of metrics.hourly.keys()) if (k < hour - 24 * 3600000) metrics.hourly.delete(k);
+  metrics.recent.unshift({ t: Date.now(), route, via, payer: payer ?? null, priceUsdc });
+  if (metrics.recent.length > 100) metrics.recent.pop();
+}
+
+const USDC_TYPE = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC';
+let balanceCache = { at: 0, usdc: null };
+async function payToUsdcBalance() {
+  if (Date.now() - balanceCache.at < 30000) return balanceCache.usdc;
+  try {
+    const b = await sui.getBalance({ owner: serve.payTo, coinType: USDC_TYPE });
+    const raw = b?.balance?.balance ?? b?.balance ?? 0n;
+    balanceCache = { at: Date.now(), usdc: Number(raw) / 1e6 };
+  } catch {
+    balanceCache = { at: Date.now(), usdc: balanceCache.usdc };
+  }
+  return balanceCache.usdc;
+}
+
 // --- Prepaid API keys: pay once via x402, then call with Authorization: Bearer <key>.
 // In-memory (single long-running process) — keys do not survive a redeploy.
 const KEY_PRICE = '0.10';
@@ -132,6 +170,8 @@ serve
   .handler(async ({ payer }) => {
     const apiKey = `si_${crypto.randomUUID().replaceAll('-', '')}`;
     apiKeys.set(apiKey, { remaining: KEY_CALLS, payer, createdAt: Date.now() });
+    metrics.keysIssued += 1;
+    record('keys', Number(KEY_PRICE), payer, 'x402');
     return {
       apiKey,
       calls: KEY_CALLS,
@@ -148,7 +188,11 @@ serve
   .paid('0.01')
   .body(input, z.toJSONSchema(input))
   .response(z.toJSONSchema(output))
-  .handler(async ({ body }) => inspect(body.address));
+  .handler(async ({ body, payer }) => {
+    const result = await inspect(body.address);
+    record('inspect', 0.01, payer, 'x402');
+    return result;
+  });
 
 const app = new Hono();
 app.get('/health', (c) => c.json({ ok: true, service: serve.name ?? 'sui-inspector-x402' }));
@@ -191,10 +235,48 @@ app.get('/', (c) => {
 before settlement &mdash; a failed call is never charged. Settles to
 <code>${serve.payTo}</code>.</p>
 <h2>Machine discovery</h2>
-<p><a href="/openapi.json">openapi.json</a> &middot; <a href="/llms.txt">llms.txt</a> &middot;
+<p><a href="/dashboard">dashboard</a> &middot; <a href="/openapi.json">openapi.json</a> &middot; <a href="/llms.txt">llms.txt</a> &middot;
 <a href="https://t2000.ai/${serve.payTo}">t2000 store listing</a></p>
 </main></body></html>`);
 });
+
+app.get('/stats.json', async (c) => {
+  let creditsOutstanding = 0;
+  for (const k of apiKeys.values()) creditsOutstanding += k.remaining;
+  const routes = Object.fromEntries(
+    [...metrics.routes.entries()].map(([p, r]) => [p, { calls: r.calls, revenueUsdc: +r.revenueUsdc.toFixed(2) }]),
+  );
+  const now = Math.floor(Date.now() / 3600000) * 3600000;
+  const hourly = [];
+  for (let i = 23; i >= 0; i--) {
+    const hour = now - i * 3600000;
+    const h = metrics.hourly.get(hour) ?? { calls: 0, revenueUsdc: 0 };
+    hourly.push({ hour, calls: h.calls, revenueUsdc: +h.revenueUsdc.toFixed(2) });
+  }
+  const totals = [...metrics.routes.values()].reduce(
+    (a, r) => ({ calls: a.calls + r.calls, revenueUsdc: a.revenueUsdc + r.revenueUsdc }),
+    { calls: 0, revenueUsdc: 0 },
+  );
+  return c.json({
+    service: serve.name,
+    payTo: serve.payTo,
+    bootedAt: metrics.bootedAt,
+    session: {
+      calls: totals.calls,
+      revenueUsdc: +totals.revenueUsdc.toFixed(2),
+      keysIssued: metrics.keysIssued,
+      creditsOutstanding,
+      activeKeys: apiKeys.size,
+    },
+    onchainUsdc: await payToUsdcBalance(),
+    routes,
+    hourly,
+    recent: metrics.recent.slice(0, 25),
+  });
+});
+
+const DASHBOARD_HTML = await readFile(new URL('./dashboard.html', import.meta.url), 'utf8');
+app.get('/dashboard', (c) => c.html(DASHBOARD_HTML));
 
 // Prepaid-key path: a valid Bearer key skips the x402 payment flow entirely.
 app.post('/inspect', async (c, next) => {
@@ -213,6 +295,7 @@ app.post('/inspect', async (c, next) => {
   if (!parsed.success) return c.json({ error: parsed.error.message }, 422);
   entry.remaining -= 1;
   const result = await inspect(parsed.data.address);
+  record('inspect', 0, entry.payer, 'key');
   return c.json(result, 200, { 'X-Key-Calls-Remaining': String(entry.remaining) });
 });
 
