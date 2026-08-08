@@ -123,6 +123,50 @@ serve
 
 const app = new Hono();
 app.get('/health', (c) => c.json({ ok: true, service: serve.name ?? 'sui-inspector-x402' }));
+
+app.get('/', (c) => {
+  const origin = new URL(c.req.url).origin;
+  const base = serve.baseUrl || origin;
+  const routes = [...serve.routes.values()].map((r) => r.meta);
+  const rows = routes
+    .map(
+      (m) => `<tr><td><code>POST /${m.path}</code></td><td>$${m.priceUsdc ?? '0'} USDC</td><td>${m.description ?? ''}</td></tr>`,
+    )
+    .join('');
+  return c.html(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${serve.name ?? 'x402 API'}</title>
+<style>
+  :root{color-scheme:light dark;--fg:#1a1d21;--bg:#fafafa;--mut:#6b7280;--card:#fff;--line:#e5e7eb;--acc:#0b7285}
+  @media (prefers-color-scheme:dark){:root{--fg:#e6e6e6;--bg:#111418;--mut:#9aa4b2;--card:#1a1f26;--line:#2a313b;--acc:#66d9e8}}
+  body{margin:0;font:16px/1.6 system-ui,sans-serif;color:var(--fg);background:var(--bg)}
+  main{max-width:760px;margin:0 auto;padding:3rem 1.25rem}
+  h1{font-size:1.6rem;margin:0 0 .25rem}
+  .sub{color:var(--mut);margin:0 0 2rem}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1rem 1.25rem;margin:0 0 1.25rem;overflow-x:auto}
+  table{border-collapse:collapse;width:100%}
+  td{padding:.4rem .6rem;border-top:1px solid var(--line);vertical-align:top}
+  tr:first-child td{border-top:0}
+  code,pre{font:13px/1.5 ui-monospace,Consolas,monospace}
+  pre{margin:0;white-space:pre-wrap;word-break:break-all}
+  a{color:var(--acc)}
+  .k{color:var(--mut)}
+  h2{font-size:1.05rem;margin:1.5rem 0 .5rem}
+</style></head><body><main>
+<h1>${serve.name ?? 'x402 API'}</h1>
+<p class="sub">${serve.description ?? ''}</p>
+<div class="card"><table>${rows}</table></div>
+<h2>Pay per call (x402, USDC on Sui mainnet)</h2>
+<div class="card"><pre>t2 pay ${base}/inspect --data '{"address":"0x..."}' --max-price 0.05</pre></div>
+<p class="k">Unpaid requests answer HTTP 402 with a signed Sui challenge. Invalid input is rejected
+before settlement &mdash; a failed call is never charged. Settles to
+<code>${serve.payTo}</code>.</p>
+<h2>Machine discovery</h2>
+<p><a href="/openapi.json">openapi.json</a> &middot; <a href="/llms.txt">llms.txt</a> &middot;
+<a href="https://t2000.ai/${serve.payTo}">t2000 store listing</a></p>
+</main></body></html>`);
+});
+
 app.all('*', (c) => serve.fetch(c.req.raw));
 
 const port = Number(process.env.PORT ?? 3000);
