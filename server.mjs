@@ -156,7 +156,8 @@ serve
     return {
       apiKey,
       calls: KEY_CALLS,
-      usage: 'POST /inspect with header "Authorization: Bearer <apiKey>" — no X-PAYMENT needed.',
+      usage:
+        'POST /inspect with {"address":"0x...","apiKey":"<apiKey>"} in the body — works anywhere you can send JSON, including the t2000 try-it dialog. From code you can instead send an "Authorization: Bearer <apiKey>" header. Either way no payment is taken.',
     };
   });
 
