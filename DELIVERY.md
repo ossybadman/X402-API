@@ -96,49 +96,63 @@ The prepaid-key alternative — pay once, then call 12 times with no payment flo
 t2 pay https://x402-api-production-be23.up.railway.app/keys --max-price 0.15
 ```
 
+Spend a credit by putting the key in the body — this form works anywhere JSON can
+be sent, including the t2000 storefront's try-it dialog, which cannot set headers:
+
 ```bash
 curl -X POST https://x402-api-production-be23.up.railway.app/inspect \
-  -H 'Authorization: Bearer si_<key from the call above>' \
   -H 'content-type: application/json' \
-  -d '{"address":"0x2"}'
+  -d '{"address":"0x2","apiKey":"si_<key from the call above>"}'
 ```
 
-Key-authed responses carry `X-Key-Calls-Remaining`. The request body is validated
-*before* a credit is deducted, so a malformed call is never charged.
+From code, an `Authorization: Bearer si_<key>` header does the same thing. Both
+forms were verified against a real purchased key, returning 200 with
+`X-Key-Calls-Remaining` counting down 12 → 11 → 10.
+
+The request body is validated *before* a credit is deducted, so a malformed call
+is never charged — verified: a bad address returns 422 with the credit intact.
 
 ---
 
 ## 4. One real paid mainnet call
 
-<!-- TODO(seller): paste the tx digest and response body from the t2 pay run. -->
-
 | Field | Value |
 |---|---|
 | Route | `POST /inspect` |
 | Price | 0.01 USDC |
-| Payer | `0xa315c9843b87a852239358df22a8bf85d9d15b962a205aec3ed9a901e4214aea` |
-| Settled at | 2026-08-08 20:34:06 UTC |
-| Tx digest | `<DIGEST>` |
-| Suiscan | https://suiscan.xyz/mainnet/tx/`<DIGEST>` |
+| Settled at | 2026-08-08 20:52:39 UTC |
+| Tx digest | `8uKh9x8rQ48Y3q1QqxYRpm1e6w28K4trjfiLpaPt7FoB` |
+| Suiscan | https://suiscan.xyz/mainnet/tx/8uKh9x8rQ48Y3q1QqxYRpm1e6w28K4trjfiLpaPt7FoB |
 
-Corroborating on-chain evidence: the recipient's USDC balance moved from
-`0.528155` to `0.538155` — exactly +0.01 USDC — across this call, and the
-service's own `/stats.json` independently recorded it:
+A second paid call bought a prepaid key on the same endpoint:
+
+| Field | Value |
+|---|---|
+| Route | `POST /keys` |
+| Price | 0.10 USDC |
+| Settled at | 2026-08-08 21:04:50 UTC |
+| Tx digest | `3x8c4qtp4tsxnRZHbUnHeGKVscDb7M285uHBEMZBa57m` |
+| Suiscan | https://suiscan.xyz/mainnet/tx/3x8c4qtp4tsxnRZHbUnHeGKVscDb7M285uHBEMZBa57m |
+
+Both digests were captured by the service itself off the `X-PAYMENT-RESPONSE`
+header and are visible with timestamps and Suiscan links on the live dashboard
+at `/dashboard`, and in `/stats.json`.
+
+Response excerpt (`POST /inspect` for the seller's own address, truncated):
 
 ```json
 {
-  "t": 1786221246937,
-  "route": "inspect",
-  "via": "x402",
-  "payer": "0xa315c9843b87a852239358df22a8bf85d9d15b962a205aec3ed9a901e4214aea",
-  "priceUsdc": 0.01
+  "address": "0xd228592180633594752f32acd3a2ed612d2f4b61e9c9e86ddc4e1f676dbcbe4b",
+  "suiBalance": "0.113198664",
+  "balances": [
+    { "coinType": "0x2::sui::SUI", "symbol": "SUI", "decimals": 9,
+      "balance": "113198664", "humanBalance": "0.113198664" },
+    { "coinType": "0xdba34672...::usdc::USDC", "symbol": "USDC", "decimals": 6,
+      "balance": "2348155", "humanBalance": "2.348155" }
+  ],
+  "objects": { "sampledCount": 2, "hasMore": false, "stakedSuiObjects": 0, "topTypes": [ ... ] },
+  "inspectedAtEpoch": "1213"
 }
-```
-
-Response excerpt:
-
-```json
-<RESPONSE EXCERPT>
 ```
 
 ---
@@ -150,7 +164,7 @@ both routes before accepting them (`probeOk: true` on each).
 
 - **Agent**: Badman, on-chain Agent ID **#85**, address `0xd228592180633594752f32acd3a2ed612d2f4b61e9c9e86ddc4e1f676dbcbe4b`
 - **Profile**: https://t2000.ai/0xd228592180633594752f32acd3a2ed612d2f4b61e9c9e86ddc4e1f676dbcbe4b
-- **Listing digest**: `QRKiQz2uvGTm7avpbjhpYEgXaWYEAPG8JBznAbgjkpA`
+- **Listing digest**: `Cgc5FdSq1ZwAGo8PhFLUe1S1UP2nUerw4PjxawW6aQdB`
 
 Anyone can verify it independently — the registered endpoint is on-chain agent
 metadata. Calling `t2000_agents` with that address returns:
