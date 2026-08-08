@@ -149,7 +149,6 @@ serve
   .response(z.toJSONSchema(keyOutput))
   .handler(async ({ payer }) => {
     const apiKey = await store.issueKey(payer, KEY_CALLS);
-    await store.record('keys', Number(KEY_PRICE), payer, 'x402');
     return {
       apiKey,
       calls: KEY_CALLS,
@@ -167,9 +166,7 @@ serve
   .body(input, z.toJSONSchema(input))
   .response(z.toJSONSchema(output))
   .handler(async ({ body, payer }) => {
-    const result = await inspect(body.address);
-    await store.record('inspect', 0.01, payer, 'x402');
-    return result;
+    return inspect(body.address);
   });
 
 const app = new Hono();
@@ -261,7 +258,23 @@ app.post('/inspect', async (c, next) => {
   return c.json(result, 200, { 'X-Key-Calls-Remaining': String(spend.remaining) });
 });
 
-app.all('*', (c) => serve.fetch(c.req.raw));
+// Record paid calls here rather than inside the handlers: the settlement digest
+// is only available on the way out, base64-JSON'd into X-PAYMENT-RESPONSE.
+app.all('*', async (c) => {
+  const res = await serve.fetch(c.req.raw);
+  const settled = res.headers.get('X-PAYMENT-RESPONSE');
+  if (res.ok && settled) {
+    try {
+      const { transaction, payer } = JSON.parse(Buffer.from(settled, 'base64').toString('utf8'));
+      const path = new URL(c.req.url).pathname.replace(/^\//, '');
+      const meta = [...serve.routes.values()].find((r) => r.meta.path === path)?.meta;
+      await store.record(path, Number(meta?.priceUsdc ?? 0), payer, 'x402', transaction);
+    } catch (err) {
+      console.error('[metrics] could not record settled call:', err.message);
+    }
+  }
+  return res;
+});
 
 const port = Number(process.env.PORT ?? 3000);
 listen({ fetch: app.fetch, port, hostname: '0.0.0.0' }, (info) => {

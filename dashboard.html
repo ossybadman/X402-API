@@ -49,6 +49,9 @@
   details{margin-top:.6rem}
   summary{color:var(--ink-3);font-size:.8rem;cursor:pointer}
   .empty{color:var(--ink-3);text-align:center;padding:1.5rem 0}
+  .when .exact{display:block;white-space:nowrap}
+  .when .rel{display:block;color:var(--ink-3);font-size:.75rem}
+  .k{color:var(--ink-3)}
   a{color:var(--series)}
 </style>
 </head>
@@ -81,7 +84,7 @@
 
   <section>
     <h2>Recent activity</h2>
-    <table id="recent"><thead><tr><th>When</th><th>Route</th><th>Via</th><th>Payer</th><th class="num">USDC</th></tr></thead><tbody></tbody></table>
+    <table id="recent"><thead><tr><th>When</th><th>Route</th><th>Via</th><th>Payer</th><th class="num">USDC</th><th>Tx</th></tr></thead><tbody></tbody></table>
     <div class="empty" id="recent-empty" hidden>No calls yet.</div>
   </section>
 </main>
@@ -101,6 +104,15 @@ const dur = (ms) => {
   return h ? h + 'h ' + m + 'm' : m + 'm';
 };
 const hourLabel = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit' });
+const exact = (t) => {
+  const d = new Date(t);
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' +
+    d.toLocaleTimeString([], { hour12: false }) + ' ' +
+    Intl.DateTimeFormat().resolvedOptions().timeZone;
+};
+const txLink = (d) => d
+  ? '<a href="https://suiscan.xyz/mainnet/tx/' + d + '" target="_blank" rel="noopener" title="' + d + '">' + d.slice(0, 8) + '…</a>'
+  : '<span class="k">—</span>';
 
 function drawChart(hourly) {
   const W = 900, H = 220, padL = 34, padB = 22, padT = 14;
@@ -168,8 +180,10 @@ async function refresh() {
     $('recent-empty').hidden = rec.length > 0;
     $('recent').hidden = rec.length === 0;
     $('recent').tBodies[0].innerHTML = rec.map((e) =>
-      '<tr><td>' + ago(e.t) + '</td><td><code>/' + e.route + '</code></td><td><span class="via">' + e.via + '</span></td>' +
-      '<td class="addr" title="' + (e.payer ?? '') + '">' + short(e.payer) + '</td><td class="num">' + fmtUsd(e.priceUsdc) + '</td></tr>'
+      '<tr><td class="when"><span class="exact">' + exact(e.t) + '</span><span class="rel">' + ago(e.t) + '</span></td>' +
+      '<td><code>/' + e.route + '</code></td><td><span class="via">' + e.via + '</span></td>' +
+      '<td class="addr" title="' + (e.payer ?? '') + '">' + short(e.payer) + '</td>' +
+      '<td class="num">' + fmtUsd(e.priceUsdc) + '</td><td class="addr">' + txLink(e.digest) + '</td></tr>'
     ).join('');
   } catch { $('refreshed').textContent = 'fetch failed — retrying'; }
 }

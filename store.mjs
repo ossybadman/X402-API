@@ -33,7 +33,7 @@ function memoryStore() {
       entry.remaining -= 1;
       return { ok: true, remaining: entry.remaining, payer: entry.payer };
     },
-    async record(route, priceUsdc, payer, via) {
+    async record(route, priceUsdc, payer, via, digest = null) {
       totals.calls += 1;
       totals.revenueUsdc += priceUsdc;
       const r = routes.get(route) ?? { calls: 0, revenueUsdc: 0 };
@@ -46,7 +46,7 @@ function memoryStore() {
       cur.revenueUsdc += priceUsdc;
       hourly.set(h, cur);
       for (const k of hourly.keys()) if (k < h - 24 * HOUR) hourly.delete(k);
-      recent.unshift({ t: Date.now(), route, via, payer: payer ?? null, priceUsdc });
+      recent.unshift({ t: Date.now(), route, via, payer: payer ?? null, priceUsdc, digest });
       if (recent.length > RECENT_CAP) recent.pop();
     },
     async stats() {
@@ -93,7 +93,7 @@ function redisStore(client) {
       }
       return { ok: true, remaining, payer: (await client.hGet(`key:${apiKey}`, 'payer')) || null };
     },
-    async record(route, priceUsdc, payer, via) {
+    async record(route, priceUsdc, payer, via, digest = null) {
       const h = hourKey();
       await client
         .multi()
@@ -105,7 +105,7 @@ function redisStore(client) {
         .incrByFloat(`m:hour:${h}:revenue`, priceUsdc)
         .expire(`m:hour:${h}:calls`, HOURLY_TTL)
         .expire(`m:hour:${h}:revenue`, HOURLY_TTL)
-        .lPush('m:recent', JSON.stringify({ t: Date.now(), route, via, payer: payer ?? null, priceUsdc }))
+        .lPush('m:recent', JSON.stringify({ t: Date.now(), route, via, payer: payer ?? null, priceUsdc, digest }))
         .lTrim('m:recent', 0, RECENT_CAP - 1)
         .sAdd('m:routes', route)
         .exec();
