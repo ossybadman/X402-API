@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { serve as listen } from '@hono/node-server';
-import { createStore } from './store.mjs';
+import { createStore, KEY_TTL } from './store.mjs';
 import { Hono } from 'hono';
 import { createServeFromEnv } from '@t2000/serve';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
@@ -141,6 +141,8 @@ const KEY_CALLS = 12;
 const keyOutput = z.object({
   apiKey: z.string(),
   calls: z.number(),
+  expiresInDays: z.number(),
+  console: z.string().describe('Open this to use the key — it is saved in your browser'),
   usage: z.string(),
 });
 
@@ -152,12 +154,16 @@ serve
   .paid(KEY_PRICE)
   .response(z.toJSONSchema(keyOutput))
   .handler(async ({ payer }) => {
+    // Minted pending — activated only once settlement confirms, in the middleware below.
     const apiKey = await store.issueKey(payer, KEY_CALLS);
+    const base = (serve.baseUrl || '').replace(/\/$/, '');
     return {
       apiKey,
       calls: KEY_CALLS,
+      expiresInDays: KEY_TTL / 86400,
+      console: `${base}/key?k=${apiKey}`,
       usage:
-        'POST /inspect with {"address":"0x...","apiKey":"<apiKey>"} in the body — works anywhere you can send JSON, including the t2000 try-it dialog. From code you can instead send an "Authorization: Bearer <apiKey>" header. Either way no payment is taken.',
+        'Open the console link to see your credits and spend them — it remembers the key in your browser. From anywhere else, POST /inspect with {"address":"0x...","apiKey":"<apiKey>"} in the body, or send an "Authorization: Bearer <apiKey>" header.',
     };
   });
 
@@ -263,7 +269,15 @@ app.post('/keys/status', async (c) => {
   if (typeof apiKey !== 'string' || !apiKey) return c.json({ error: 'apiKey is required' }, 422);
   const status = await store.keyStatus(apiKey.trim());
   if (!status) return c.json({ error: 'unknown or expired API key' }, 404);
-  return c.json({ remaining: status.remaining, issued: KEY_CALLS, createdAt: status.createdAt });
+  if (status.status !== 'active') {
+    return c.json({ error: 'this key is not active — its payment did not settle' }, 402);
+  }
+  return c.json({
+    remaining: status.remaining,
+    issued: KEY_CALLS,
+    createdAt: status.createdAt,
+    expiresAt: status.expiresAt,
+  });
 });
 
 // Prepaid-key path: a valid key skips the x402 payment flow entirely. The key may
@@ -289,29 +303,46 @@ app.post('/inspect', async (c, next) => {
   if (!parsed.success) return c.json({ error: parsed.error.message }, 422);
   const spend = await store.consumeKey(key);
   if (!spend.ok) {
-    return spend.reason === 'unknown'
-      ? c.json({ error: 'unknown or expired API key' }, 401)
-      : c.json({ error: 'API key out of credits — buy a new one at POST /keys' }, 402);
+    if (spend.reason === 'unknown') return c.json({ error: 'unknown or expired API key' }, 401);
+    if (spend.reason === 'pending') {
+      return c.json({ error: 'this key is not active — its payment did not settle' }, 402);
+    }
+    return c.json({ error: 'API key out of credits — buy a new one at POST /keys' }, 402);
   }
   const result = await inspect(parsed.data.address);
   await store.record('inspect', 0, spend.payer, 'key');
   return c.json(result, 200, { 'X-Key-Calls-Remaining': String(spend.remaining) });
 });
 
-// Record paid calls here rather than inside the handlers: the settlement digest
-// is only available on the way out, base64-JSON'd into X-PAYMENT-RESPONSE.
+// Everything that must happen only for *settled* calls happens here. X-PAYMENT-RESPONSE
+// is present solely on a confirmed settlement, which is what makes this the safe place
+// to activate a minted key — the handler itself runs before any money moves.
 app.all('*', async (c) => {
   const res = await serve.fetch(c.req.raw);
   const settled = res.headers.get('X-PAYMENT-RESPONSE');
-  if (res.ok && settled) {
-    try {
-      const { transaction, payer } = JSON.parse(Buffer.from(settled, 'base64').toString('utf8'));
-      const path = new URL(c.req.url).pathname.replace(/^\//, '');
-      const meta = [...serve.routes.values()].find((r) => r.meta.path === path)?.meta;
-      await store.record(path, Number(meta?.priceUsdc ?? 0), payer, 'x402', transaction);
-    } catch (err) {
-      console.error('[metrics] could not record settled call:', err.message);
+  if (!res.ok || !settled) return res;
+
+  const path = new URL(c.req.url).pathname.replace(/^\//, '');
+  let transaction = null;
+  let payer = null;
+  try {
+    ({ transaction, payer } = JSON.parse(Buffer.from(settled, 'base64').toString('utf8')));
+    const meta = [...serve.routes.values()].find((r) => r.meta.path === path)?.meta;
+    await store.record(path, Number(meta?.priceUsdc ?? 0), payer, 'x402', transaction);
+  } catch (err) {
+    console.error('[metrics] could not record settled call:', err.message);
+  }
+
+  if (path !== 'keys') return res;
+  // Read a clone to learn which key was minted, then activate it — the original
+  // response body is left untouched for the client.
+  try {
+    const { apiKey } = JSON.parse(await res.clone().text());
+    if (apiKey && (await store.activateKey(apiKey, transaction))) {
+      console.log(`[keys] activated ${apiKey.slice(0, 7)}… after settlement ${transaction}`);
     }
+  } catch (err) {
+    console.error('[keys] could not activate minted key:', err.message);
   }
   return res;
 });

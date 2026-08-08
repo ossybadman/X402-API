@@ -7,6 +7,13 @@ const HOUR = 3600000;
 const RECENT_CAP = 100;
 const HOURLY_TTL = 172800; // 48h — the dashboard only plots the last 24h
 
+// @t2000/serve runs the route handler BEFORE settling payment, so a key minted in
+// the handler exists even when the payment then fails. Keys are therefore born
+// `pending` and unusable, and only `activateKey` (called once settlement is
+// confirmed) makes them spendable. Unclaimed pending keys expire quickly.
+export const PENDING_TTL = 900; // 15 min
+export const KEY_TTL = 30 * 24 * 3600; // 30 days once paid for
+
 const hourKey = (t = Date.now()) => Math.floor(t / HOUR) * HOUR;
 const newKeyId = () => `si_${crypto.randomUUID().replaceAll('-', '')}`;
 // Keys are bearer tokens and /dashboard is unauthenticated, so only ever show a mask there.
@@ -14,6 +21,16 @@ const maskKey = (k) => `${k.slice(0, 7)}…${k.slice(-4)}`;
 
 function memoryStore() {
   const keys = new Map();
+  // Redis expires hashes for us; in memory we sweep lazily on read.
+  const live = (k) => {
+    const e = keys.get(k);
+    if (!e) return null;
+    if (e.expiresAt && e.expiresAt < Date.now()) {
+      keys.delete(k);
+      return null;
+    }
+    return e;
+  };
   const routes = new Map();
   const hourly = new Map();
   const recent = [];
@@ -24,27 +41,49 @@ function memoryStore() {
     backend: 'memory',
     async issueKey(payer, calls) {
       const apiKey = newKeyId();
-      keys.set(apiKey, { remaining: calls, payer, createdAt: Date.now() });
-      totals.keysIssued += 1;
+      keys.set(apiKey, {
+        remaining: calls,
+        payer,
+        createdAt: Date.now(),
+        status: 'pending',
+        expiresAt: Date.now() + PENDING_TTL * 1000,
+      });
       return apiKey;
     },
-    async consumeKey(apiKey) {
+    async activateKey(apiKey, digest) {
       const entry = keys.get(apiKey);
+      if (!entry || entry.status === 'active') return false;
+      entry.status = 'active';
+      entry.digest = digest ?? null;
+      entry.expiresAt = Date.now() + KEY_TTL * 1000;
+      totals.keysIssued += 1;
+      return true;
+    },
+    async consumeKey(apiKey) {
+      const entry = live(apiKey);
       if (!entry) return { ok: false, reason: 'unknown' };
+      if (entry.status !== 'active') return { ok: false, reason: 'pending' };
       if (entry.remaining <= 0) return { ok: false, reason: 'exhausted' };
       entry.remaining -= 1;
       return { ok: true, remaining: entry.remaining, payer: entry.payer };
     },
     async keyStatus(apiKey) {
-      const entry = keys.get(apiKey);
-      return entry ? { remaining: entry.remaining, createdAt: entry.createdAt } : null;
+      const e = live(apiKey);
+      return e
+        ? { remaining: e.remaining, createdAt: e.createdAt, status: e.status, expiresAt: e.expiresAt }
+        : null;
     },
     async listKeys() {
-      return [...keys.entries()].map(([k, v]) => ({
-        masked: maskKey(k),
-        remaining: v.remaining,
-        createdAt: v.createdAt,
-      }));
+      return [...keys.entries()]
+        .filter(([k]) => live(k))
+        .map(([k, v]) => ({
+          masked: maskKey(k),
+          remaining: v.remaining,
+          createdAt: v.createdAt,
+          status: v.status,
+          expiresAt: v.expiresAt,
+        }))
+        .sort((a, b) => b.createdAt - a.createdAt);
     },
     async record(route, priceUsdc, payer, via, digest = null) {
       totals.calls += 1;
@@ -90,14 +129,32 @@ function redisStore(client) {
       const apiKey = newKeyId();
       await client
         .multi()
-        .hSet(`key:${apiKey}`, { remaining: String(calls), payer: payer ?? '', createdAt: String(Date.now()) })
+        .hSet(`key:${apiKey}`, {
+          remaining: String(calls),
+          payer: payer ?? '',
+          createdAt: String(Date.now()),
+          status: 'pending',
+        })
+        .expire(`key:${apiKey}`, PENDING_TTL)
         .sAdd('keys:all', apiKey)
-        .incr('m:keysIssued')
         .exec();
       return apiKey;
     },
+    async activateKey(apiKey, digest) {
+      const status = await client.hGet(`key:${apiKey}`, 'status');
+      if (status !== 'pending') return false; // gone, or already activated
+      await client
+        .multi()
+        .hSet(`key:${apiKey}`, { status: 'active', digest: digest ?? '' })
+        .expire(`key:${apiKey}`, KEY_TTL)
+        .incr('m:keysIssued')
+        .exec();
+      return true;
+    },
     async consumeKey(apiKey) {
-      if (!(await client.exists(`key:${apiKey}`))) return { ok: false, reason: 'unknown' };
+      const status = await client.hGet(`key:${apiKey}`, 'status');
+      if (status === undefined || status === null) return { ok: false, reason: 'unknown' };
+      if (status !== 'active') return { ok: false, reason: 'pending' };
       // HINCRBY is atomic, so concurrent calls can't both spend the last credit.
       const remaining = await client.hIncrBy(`key:${apiKey}`, 'remaining', -1);
       if (remaining < 0) {
@@ -107,18 +164,31 @@ function redisStore(client) {
       return { ok: true, remaining, payer: (await client.hGet(`key:${apiKey}`, 'payer')) || null };
     },
     async keyStatus(apiKey) {
-      const h = await client.hGetAll(`key:${apiKey}`);
+      const [h, ttl] = await Promise.all([client.hGetAll(`key:${apiKey}`), client.ttl(`key:${apiKey}`)]);
       if (!h || h.remaining === undefined) return null;
-      return { remaining: Number(h.remaining), createdAt: Number(h.createdAt) };
+      return {
+        remaining: Number(h.remaining),
+        createdAt: Number(h.createdAt),
+        status: h.status ?? 'active',
+        expiresAt: ttl > 0 ? Date.now() + ttl * 1000 : null,
+      };
     },
     async listKeys() {
       const ids = await client.sMembers('keys:all');
-      const rows = await Promise.all(ids.map((k) => client.hGetAll(`key:${k}`)));
-      return ids
-        .map((k, i) => ({
+      const rows = await Promise.all(
+        ids.map(async (k) => [k, await client.hGetAll(`key:${k}`), await client.ttl(`key:${k}`)]),
+      );
+      // Expired hashes leave stale members behind in the set; drop them as we see them.
+      const dead = rows.filter(([, h]) => !h || h.remaining === undefined).map(([k]) => k);
+      if (dead.length) await client.sRem('keys:all', dead);
+      return rows
+        .filter(([, h]) => h && h.remaining !== undefined)
+        .map(([k, h, ttl]) => ({
           masked: maskKey(k),
-          remaining: Number(rows[i]?.remaining ?? 0),
-          createdAt: Number(rows[i]?.createdAt ?? 0),
+          remaining: Number(h.remaining),
+          createdAt: Number(h.createdAt),
+          status: h.status ?? 'active',
+          expiresAt: ttl > 0 ? Date.now() + ttl * 1000 : null,
         }))
         .sort((a, b) => b.createdAt - a.createdAt);
     },
