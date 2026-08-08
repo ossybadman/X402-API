@@ -62,7 +62,7 @@ function memoryStore() {
     async consumeKey(apiKey) {
       const entry = live(apiKey);
       if (!entry) return { ok: false, reason: 'unknown' };
-      if (entry.status !== 'active') return { ok: false, reason: 'pending' };
+      if (entry.status && entry.status !== 'active') return { ok: false, reason: 'pending' };
       if (entry.remaining <= 0) return { ok: false, reason: 'exhausted' };
       entry.remaining -= 1;
       return { ok: true, remaining: entry.remaining, payer: entry.payer };
@@ -152,9 +152,10 @@ function redisStore(client) {
       return true;
     },
     async consumeKey(apiKey) {
+      if (!(await client.exists(`key:${apiKey}`))) return { ok: false, reason: 'unknown' };
+      // Keys issued before the pending/active split carry no status; treat them as active.
       const status = await client.hGet(`key:${apiKey}`, 'status');
-      if (status === undefined || status === null) return { ok: false, reason: 'unknown' };
-      if (status !== 'active') return { ok: false, reason: 'pending' };
+      if (status && status !== 'active') return { ok: false, reason: 'pending' };
       // HINCRBY is atomic, so concurrent calls can't both spend the last credit.
       const remaining = await client.hIncrBy(`key:${apiKey}`, 'remaining', -1);
       if (remaining < 0) {
