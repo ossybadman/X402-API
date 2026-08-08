@@ -102,7 +102,13 @@ async function inspect(address) {
   };
 }
 
-const serve = createServeFromEnv();
+const serve = createServeFromEnv({
+  T2000_PAY_TO: '0xd228592180633594752f32acd3a2ed612d2f4b61e9c9e86ddc4e1f676dbcbe4b',
+  T2000_NAME: 'Sui Address Inspector',
+  T2000_DESCRIPTION:
+    'Balances, objects, and stakes for any Sui mainnet address — paid per call in USDC via x402.',
+  ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v)),
+});
 
 serve
   .route({
