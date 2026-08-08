@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { serve as listen } from '@hono/node-server';
+import { createStore } from './store.mjs';
 import { Hono } from 'hono';
 import { createServeFromEnv } from '@t2000/serve';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
@@ -111,28 +112,9 @@ const serve = createServeFromEnv({
   ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v)),
 });
 
-// --- Session metrics (in-memory; reset on redeploy). Fed to /stats.json + /dashboard.
-const metrics = {
-  bootedAt: Date.now(),
-  routes: new Map(), // path -> { calls, revenueUsdc }
-  hourly: new Map(), // hourStartMs -> { calls, revenueUsdc }
-  recent: [], // newest first, capped
-  keysIssued: 0,
-};
-function record(route, priceUsdc, payer, via) {
-  const r = metrics.routes.get(route) ?? { calls: 0, revenueUsdc: 0 };
-  r.calls += 1;
-  r.revenueUsdc += priceUsdc;
-  metrics.routes.set(route, r);
-  const hour = Math.floor(Date.now() / 3600000) * 3600000;
-  const h = metrics.hourly.get(hour) ?? { calls: 0, revenueUsdc: 0 };
-  h.calls += 1;
-  h.revenueUsdc += priceUsdc;
-  metrics.hourly.set(hour, h);
-  for (const k of metrics.hourly.keys()) if (k < hour - 24 * 3600000) metrics.hourly.delete(k);
-  metrics.recent.unshift({ t: Date.now(), route, via, payer: payer ?? null, priceUsdc });
-  if (metrics.recent.length > 100) metrics.recent.pop();
-}
+// Prepaid keys + call metrics live here; durable when REDIS_URL is set.
+const store = await createStore();
+const bootedAt = Date.now();
 
 const USDC_TYPE = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC';
 let balanceCache = { at: 0, usdc: null };
@@ -149,10 +131,8 @@ async function payToUsdcBalance() {
 }
 
 // --- Prepaid API keys: pay once via x402, then call with Authorization: Bearer <key>.
-// In-memory (single long-running process) — keys do not survive a redeploy.
 const KEY_PRICE = '0.10';
 const KEY_CALLS = 12;
-const apiKeys = new Map();
 
 const keyOutput = z.object({
   apiKey: z.string(),
@@ -168,10 +148,8 @@ serve
   .paid(KEY_PRICE)
   .response(z.toJSONSchema(keyOutput))
   .handler(async ({ payer }) => {
-    const apiKey = `si_${crypto.randomUUID().replaceAll('-', '')}`;
-    apiKeys.set(apiKey, { remaining: KEY_CALLS, payer, createdAt: Date.now() });
-    metrics.keysIssued += 1;
-    record('keys', Number(KEY_PRICE), payer, 'x402');
+    const apiKey = await store.issueKey(payer, KEY_CALLS);
+    await store.record('keys', Number(KEY_PRICE), payer, 'x402');
     return {
       apiKey,
       calls: KEY_CALLS,
@@ -190,7 +168,7 @@ serve
   .response(z.toJSONSchema(output))
   .handler(async ({ body, payer }) => {
     const result = await inspect(body.address);
-    record('inspect', 0.01, payer, 'x402');
+    await store.record('inspect', 0.01, payer, 'x402');
     return result;
   });
 
@@ -241,37 +219,18 @@ before settlement &mdash; a failed call is never charged. Settles to
 });
 
 app.get('/stats.json', async (c) => {
-  let creditsOutstanding = 0;
-  for (const k of apiKeys.values()) creditsOutstanding += k.remaining;
-  const routes = Object.fromEntries(
-    [...metrics.routes.entries()].map(([p, r]) => [p, { calls: r.calls, revenueUsdc: +r.revenueUsdc.toFixed(2) }]),
-  );
-  const now = Math.floor(Date.now() / 3600000) * 3600000;
-  const hourly = [];
-  for (let i = 23; i >= 0; i--) {
-    const hour = now - i * 3600000;
-    const h = metrics.hourly.get(hour) ?? { calls: 0, revenueUsdc: 0 };
-    hourly.push({ hour, calls: h.calls, revenueUsdc: +h.revenueUsdc.toFixed(2) });
-  }
-  const totals = [...metrics.routes.values()].reduce(
-    (a, r) => ({ calls: a.calls + r.calls, revenueUsdc: a.revenueUsdc + r.revenueUsdc }),
-    { calls: 0, revenueUsdc: 0 },
-  );
+  const s = await store.stats();
   return c.json({
     service: serve.name,
     payTo: serve.payTo,
-    bootedAt: metrics.bootedAt,
-    session: {
-      calls: totals.calls,
-      revenueUsdc: +totals.revenueUsdc.toFixed(2),
-      keysIssued: metrics.keysIssued,
-      creditsOutstanding,
-      activeKeys: apiKeys.size,
-    },
+    bootedAt,
+    durable: store.backend === 'redis',
+    since: s.since,
+    totals: s.totals,
     onchainUsdc: await payToUsdcBalance(),
-    routes,
-    hourly,
-    recent: metrics.recent.slice(0, 25),
+    routes: s.routes,
+    hourly: s.hourly,
+    recent: s.recent,
   });
 });
 
@@ -283,9 +242,7 @@ app.post('/inspect', async (c, next) => {
   const auth = c.req.header('authorization') ?? '';
   const key = auth.startsWith('Bearer ') ? auth.slice(7).trim() : null;
   if (!key) return next();
-  const entry = apiKeys.get(key);
-  if (!entry) return c.json({ error: 'unknown or expired API key' }, 401);
-  if (entry.remaining <= 0) return c.json({ error: 'API key out of credits — buy a new one at POST /keys' }, 402);
+  // Validate the body before spending a credit so a malformed call is never charged.
   let parsed;
   try {
     parsed = input.safeParse(await c.req.json());
@@ -293,10 +250,15 @@ app.post('/inspect', async (c, next) => {
     return c.json({ error: 'body must be JSON' }, 422);
   }
   if (!parsed.success) return c.json({ error: parsed.error.message }, 422);
-  entry.remaining -= 1;
+  const spend = await store.consumeKey(key);
+  if (!spend.ok) {
+    return spend.reason === 'unknown'
+      ? c.json({ error: 'unknown or expired API key' }, 401)
+      : c.json({ error: 'API key out of credits — buy a new one at POST /keys' }, 402);
+  }
   const result = await inspect(parsed.data.address);
-  record('inspect', 0, entry.payer, 'key');
-  return c.json(result, 200, { 'X-Key-Calls-Remaining': String(entry.remaining) });
+  await store.record('inspect', 0, spend.payer, 'key');
+  return c.json(result, 200, { 'X-Key-Calls-Remaining': String(spend.remaining) });
 });
 
 app.all('*', (c) => serve.fetch(c.req.raw));

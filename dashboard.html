@@ -56,12 +56,12 @@
 <main>
   <header>
     <h1>Sui Address Inspector</h1>
-    <span class="meta">up <span id="uptime">—</span> · refreshed <span id="refreshed">—</span> · <a href="/">docs</a></span>
+    <span class="meta">up <span id="uptime">—</span> · <span id="store">—</span> · refreshed <span id="refreshed">—</span></span>
   </header>
 
   <div class="tiles">
-    <div class="tile"><p class="k">Session revenue</p><div class="v" id="t-rev">—</div><div class="s">USDC settled to this process</div></div>
-    <div class="tile"><p class="k">Session calls</p><div class="v" id="t-calls">—</div><div class="s" id="t-calls-sub">paid + key-authed</div></div>
+    <div class="tile"><p class="k">Revenue</p><div class="v" id="t-rev">—</div><div class="s" id="t-rev-sub">USDC settled</div></div>
+    <div class="tile"><p class="k">Calls</p><div class="v" id="t-calls">—</div><div class="s" id="t-calls-sub">paid + key-authed</div></div>
     <div class="tile"><p class="k">Prepaid keys</p><div class="v" id="t-keys">—</div><div class="s" id="t-keys-sub">— credits outstanding</div></div>
     <div class="tile"><p class="k">Wallet USDC</p><div class="v" id="t-chain">—</div><div class="s">on-chain balance of payTo</div></div>
   </div>
@@ -149,12 +149,16 @@ function drawChart(hourly) {
 async function refresh() {
   try {
     const d = await (await fetch('/stats.json')).json();
-    $('t-rev').textContent = fmtUsd(d.session.revenueUsdc);
-    $('t-calls').textContent = d.session.calls;
-    $('t-keys').textContent = d.session.keysIssued;
-    $('t-keys-sub').textContent = d.session.creditsOutstanding + ' credits outstanding';
+    $('t-rev').textContent = fmtUsd(d.totals.revenueUsdc);
+    $('t-calls').textContent = d.totals.calls;
+    $('t-keys').textContent = d.totals.keysIssued;
+    $('t-keys-sub').textContent = d.totals.creditsOutstanding + ' credits outstanding';
     $('t-chain').textContent = fmtUsd(d.onchainUsdc);
     $('uptime').textContent = dur(Date.now() - d.bootedAt);
+    $('store').textContent = d.durable ? 'durable' : 'in-memory';
+    $('t-rev-sub').textContent = d.durable
+      ? 'USDC settled since ' + new Date(d.since).toLocaleDateString()
+      : 'USDC settled this process';
     $('refreshed').textContent = 'just now';
     drawChart(d.hourly);
     $('routes').tBodies[0].innerHTML = Object.entries(d.routes).map(([p, r]) =>
