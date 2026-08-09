@@ -1,10 +1,13 @@
 node_modules/
 .next/
-.env
-.env.local
 next-env.d.ts
-DELIVERY.md
 tsconfig.tsbuildinfo
 
+.env
+.env*.local
 .vercel
-.env*
+
+.claude/
+skills-lock.json
+
+.agents/
