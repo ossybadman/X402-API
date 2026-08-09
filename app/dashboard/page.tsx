@@ -24,7 +24,7 @@ const INK = '#ededed';
 const INK2 = '#a1a1a1';
 const INK3 = '#8f8f8f';
 const INK4 = '#666';
-const GREEN = '#7ee2a8';
+const AMBER = '#e2c07e';
 // Chart marks are held to a stricter bar than UI chrome: this hue is validated for
 // lightness band, chroma floor, and contrast against the surface above. The
 // storefront's lighter blue and green fail those checks as data colours.
@@ -180,9 +180,13 @@ export default function Dashboard() {
   const [d, setD] = useState<Stats | null>(null);
   const [err, setErr] = useState(false);
 
+  const [fetchedAt, setFetchedAt] = useState<number | null>(null);
+  const [, setTick] = useState(0);
+
   const load = useCallback(async () => {
     try {
       setD(await (await fetch('/stats.json', { cache: 'no-store' })).json());
+      setFetchedAt(Date.now());
       setErr(false);
     } catch {
       setErr(true);
@@ -192,11 +196,23 @@ export default function Dashboard() {
   useEffect(() => {
     load();
     const id = setInterval(load, 15000);
-    return () => clearInterval(id);
+    // Separate beat so the freshness label ages between fetches.
+    const tick = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => {
+      clearInterval(id);
+      clearInterval(tick);
+    };
   }, [load]);
 
-  const status = d == null ? 'checking' : d.enabled ? 'recording' : 'not recording';
-  const statusOk = d?.enabled === true;
+  const age = fetchedAt == null ? null : Math.floor((Date.now() - fetchedAt) / 1000);
+  const updatedLabel =
+    age == null ? 'loading' : age < 5 ? 'up to date' : age < 60 ? `updated ${age}s ago` : `updated ${Math.floor(age / 60)}m ago`;
+
+  // A pill that says something normal on every load is noise. This one reports how
+  // fresh the numbers are, and only raises its voice when they cannot be trusted.
+  const broken = err || d?.enabled === false;
+  const status =
+    d == null ? 'loading' : err ? 'connection lost' : d.enabled ? updatedLabel : 'metrics offline';
 
   const tiles = [
     { k: 'Revenue', v: usd(d?.totals.revenueUsdc), s: 'USDC settled on chain' },
@@ -241,20 +257,25 @@ export default function Dashboard() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <a href="/" style={{ fontSize: 12.5, color: INK2, textDecoration: 'none' }}>
-            storefront
+            View public page
           </a>
           <span
             style={{
               fontSize: 11.5,
               fontFamily: mono,
-              color: statusOk ? GREEN : INK4,
-              border: `1px solid ${statusOk ? '#1f3a2a' : EDGE}`,
-              background: statusOk ? '#0d1a12' : 'transparent',
+              color: broken ? AMBER : INK3,
+              border: `1px solid ${broken ? '#3a2f1f' : EDGE}`,
+              background: broken ? '#1a1408' : 'transparent',
               borderRadius: 999,
               padding: '4px 10px',
             }}
+            title={
+              broken
+                ? 'Figures below may be stale or incomplete'
+                : 'Figures refresh every 15 seconds'
+            }
           >
-            {err ? 'retrying' : status}
+            {status}
           </span>
         </div>
       </header>
