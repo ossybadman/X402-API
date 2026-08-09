@@ -1,4 +1,6 @@
 node_modules/
+.next/
 .env
-server.log
+.env.local
+next-env.d.ts
 DELIVERY.md
